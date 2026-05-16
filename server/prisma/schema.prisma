@@ -1,0 +1,827 @@
+// ============================================================
+// Photo Selection SaaS — Full Prisma Schema
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  ADMIN
+  PHOTOGRAPHER
+}
+
+enum PlanInterval {
+  MONTHLY
+  YEARLY
+  LIFETIME
+}
+
+enum SupportLevel {
+  COMMUNITY     // Free tier — no dedicated support
+  EMAIL         // Basic — email support
+  PRIORITY      // Pro — priority queue
+  DEDICATED     // Enterprise — dedicated account manager
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE      // Payment failed, within grace period
+  CANCELED
+  EXPIRED
+  PAUSED
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum SelectionState {
+  SELECTED
+  REJECTED
+  FAVORITE
+  SHORTLISTED
+}
+
+enum ShareLinkType {
+  PUBLIC
+  PASSWORD_PROTECTED
+  PRIVATE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  STRIPE
+  RAZORPAY
+}
+
+enum NotificationType {
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  GALLERY_SHARED
+  SELECTIONS_SUBMITTED
+  STORAGE_WARNING
+  STORAGE_CRITICAL
+  SUBSCRIPTION_EXPIRING
+  SUBSCRIPTION_EXPIRED
+  UPLOAD_COMPLETE
+  ZIP_READY
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum IntegrationProvider {
+  CLOUDFLARE_R2
+  STRIPE
+  RAZORPAY
+  SMTP
+  SENTRY
+  WEBHOOK
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  SIGNUP
+  PASSWORD_RESET
+  EMAIL_VERIFIED
+  PLAN_UPGRADED
+  PLAN_DOWNGRADED
+  PROJECT_CREATED
+  PROJECT_DELETED
+  PROJECT_ARCHIVED
+  MEDIA_UPLOADED
+  MEDIA_DELETED
+  SHARE_LINK_CREATED
+  SHARE_LINK_REVOKED
+  ZIP_DOWNLOADED
+  INTEGRATION_UPDATED
+  KEY_ROTATED
+  ADMIN_ACTION
+}
+
+// ============================================================
+// TABLE 1 — PLANS
+// The master config for every subscription tier.
+// Admin creates/edits these. No code changes needed to add plans.
+// ============================================================
+
+model Plan {
+  id                    String       @id @default(cuid())
+
+  // Identity
+  name                  String       @unique          // "Free" | "Basic" | "Pro" | "Enterprise"
+  slug                  String       @unique          // "free" | "basic" | "pro" | "enterprise"
+  description           String?                       // Marketing copy shown on pricing page
+  tagline               String?                       // Short badge text e.g. "Most Popular"
+  is_active             Boolean      @default(true)   // Admin can disable a plan
+  is_featured           Boolean      @default(false)  // Highlight on pricing page
+  is_custom             Boolean      @default(false)  // Enterprise / negotiated plans
+  display_order         Int          @default(0)      // Sort order on pricing page
+
+  // ── Storage ──────────────────────────────────────────────
+  storage_limit_gb      Float                         // e.g. 5 | 50 | 500 | 0 = unlimited
+  // 0 means unlimited (Enterprise custom)
+
+  // ── Upload Limits ─────────────────────────────────────────
+  max_file_size_mb      Int          @default(50)     // Max single file size in MB
+  max_upload_per_month  Int?                          // NULL = unlimited
+  allowed_media_types   String[]     @default(["IMAGE", "VIDEO"]) // ENUM strings
+
+  // ── Project / Album / Gallery Limits ──────────────────────
+  max_projects          Int?                          // NULL = unlimited
+  max_albums_per_project Int?                         // NULL = unlimited
+  max_clients_per_project Int?                        // NULL = unlimited
+  max_selections_per_gallery Int?                     // NULL = unlimited
+
+  // ── Validity & Billing ─────────────────────────────────────
+  interval              PlanInterval @default(MONTHLY)
+  validity_days         Int?                          // NULL = perpetual until canceled
+  // For MONTHLY = 30, YEARLY = 365, LIFETIME = NULL
+
+  trial_days            Int          @default(0)      // Free trial days before charging
+  grace_period_days     Int          @default(3)      // Days after payment failure before lockout
+
+  // ── Pricing (stored in smallest currency unit) ─────────────
+  price_inr             Int          @default(0)      // Price in paise (INR × 100). 0 = Free
+  price_usd             Int          @default(0)      // Price in cents (USD × 100). 0 = Free
+  currency_default      String       @default("INR")  // Default display currency
+
+  // Annual discount shown to user (display only, actual price in price_inr/usd)
+  annual_discount_percent Float?                      // e.g. 20 = 20% off
+
+  // ── Payment Gateway Plan IDs ───────────────────────────────
+  stripe_price_id       String?                       // Stripe Price ID for this plan
+  stripe_product_id     String?                       // Stripe Product ID
+  razorpay_plan_id      String?                       // Razorpay Plan ID
+
+  // ── Feature Flags ─────────────────────────────────────────
+  // Gallery & Sharing
+  allow_password_links  Boolean      @default(false)  // Password-protected share links
+  allow_expiring_links  Boolean      @default(true)   // Time-limited share links
+  allow_private_links   Boolean      @default(true)   // Private / invite-only links
+  allow_client_download Boolean      @default(false)  // Clients can download photos
+  allow_zip_download    Boolean      @default(false)  // ZIP export for selections
+
+  // Watermarking
+  allow_watermark_removal Boolean    @default(false)  // Remove platform watermark
+  watermark_on_preview  Boolean      @default(true)   // Watermark on preview images
+
+  // Branding
+  allow_custom_domain   Boolean      @default(false)  // Custom domain for galleries
+  allow_custom_branding Boolean      @default(false)  // Remove "Powered by" badge
+  allow_white_label     Boolean      @default(false)  // Full white-label
+
+  // Video
+  allow_video_uploads   Boolean      @default(false)  // Video upload support
+  allow_video_streaming Boolean      @default(false)  // Adaptive video streaming
+
+  // Advanced
+  allow_analytics       Boolean      @default(false)  // Gallery view analytics
+  allow_webhooks        Boolean      @default(false)  // Outbound webhook events
+  allow_api_access      Boolean      @default(false)  // REST API access token
+  allow_team_members    Int          @default(1)      // Number of team seats (1 = solo)
+
+  // ── Support ───────────────────────────────────────────────
+  support_level         SupportLevel @default(COMMUNITY)
+  sla_response_hours    Int?                          // SLA in hours (NULL = no SLA)
+
+  // ── Timestamps ────────────────────────────────────────────
+  created_at            DateTime     @default(now())
+  updated_at            DateTime     @updatedAt
+
+  // ── Relations ─────────────────────────────────────────────
+  subscriptions         Subscription[]
+
+  @@map("plans")
+}
+
+// ============================================================
+// TABLE 2 — USERS
+// Photographers + Admins. Clients have NO user account.
+// ============================================================
+
+model User {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  password_hash       String
+  role                Role      @default(PHOTOGRAPHER)
+
+  // Profile
+  full_name           String
+  avatar_url          String?
+  phone               String?
+  country             String?
+  timezone            String?   @default("Asia/Kolkata")
+  preferences         Json?
+
+  // Email verification
+  is_email_verified   Boolean   @default(false)
+  email_verify_token  String?
+  email_verify_expires DateTime?
+
+  // Password reset
+  reset_token         String?
+  reset_token_expires DateTime?
+
+  // Account state
+  is_active           Boolean   @default(true)
+  is_suspended        Boolean   @default(false)
+  suspension_reason   String?
+
+  // Timestamps
+  last_login_at       DateTime?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+
+  // Relations
+  subscription        Subscription?
+  projects            Project[]
+  client_galleries    ClientGallery[]
+  share_links         ShareLink[]
+  payments            Payment[]
+  invoices            Invoice[]
+  notifications       Notification[]
+  audit_logs          AuditLog[]
+  refresh_tokens      RefreshToken[]
+  storage_usage       StorageUsage?
+  upload_jobs         UploadJob[]
+  zip_jobs            ZipJob[]
+
+  @@map("users")
+}
+
+// ============================================================
+// TABLE 3 — REFRESH TOKENS
+// JWT refresh token rotation. One row per active device session.
+// ============================================================
+
+model RefreshToken {
+  id          String    @id @default(cuid())
+  user_id     String
+  token_hash  String    @unique  // SHA-256 hash of the token
+  device_info String?            // User-agent / device fingerprint
+  ip_address  String?
+  is_revoked  Boolean   @default(false)
+  expires_at  DateTime
+  created_at  DateTime  @default(now())
+
+  user        User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("refresh_tokens")
+}
+
+// ============================================================
+// TABLE 4 — SUBSCRIPTIONS
+// One active subscription per photographer at a time.
+// ============================================================
+
+model Subscription {
+  id                    String             @id @default(cuid())
+  user_id               String             @unique
+  plan_id               String
+
+  status                SubscriptionStatus @default(TRIALING)
+  interval              PlanInterval
+
+  // Dates
+  trial_ends_at         DateTime?
+  current_period_start  DateTime
+  current_period_end    DateTime
+  grace_period_ends_at  DateTime?          // Set when payment fails
+  canceled_at           DateTime?
+  expires_at            DateTime?          // Hard expiry (non-recurring)
+
+  // Payment gateway subscription references
+  stripe_subscription_id    String?
+  razorpay_subscription_id  String?
+  payment_provider          PaymentProvider?
+
+  // Usage warnings sent
+  storage_warning_sent      Boolean  @default(false)   // 80% warning
+  storage_critical_sent     Boolean  @default(false)   // 95% warning
+  expiry_warning_sent       Boolean  @default(false)   // 7-day warning
+
+  // Metadata
+  cancel_reason         String?
+  notes                 String?
+
+  created_at            DateTime   @default(now())
+  updated_at            DateTime   @updatedAt
+
+  user                  User       @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  plan                  Plan       @relation(fields: [plan_id], references: [id])
+
+  @@index([plan_id])
+  @@map("subscriptions")
+}
+
+// ============================================================
+// TABLE 5 — STORAGE USAGE
+// Real-time storage tracking per photographer.
+// Updated on upload/delete/archive. Background job recalculates.
+// ============================================================
+
+model StorageUsage {
+  id              String   @id @default(cuid())
+  user_id         String   @unique
+
+  // Bytes
+  storage_used    BigInt   @default(0)    // Total bytes used
+  storage_limit   BigInt                  // Copied from plan at subscription time
+
+  // Breakdown
+  images_used     BigInt   @default(0)
+  videos_used     BigInt   @default(0)
+  thumbnails_used BigInt   @default(0)
+  temp_used       BigInt   @default(0)   // ZIP/temp files
+
+  // Counts
+  total_files     Int      @default(0)
+  total_images    Int      @default(0)
+  total_videos    Int      @default(0)
+
+  last_calculated_at DateTime @default(now())
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  user            User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("storage_usage")
+}
+
+// ============================================================
+// TABLE 6 — PROJECTS
+// Top-level container. Each project belongs to one photographer.
+// ============================================================
+
+model Project {
+  id              String    @id @default(cuid())
+  photographer_id String
+  name            String
+  description     String?
+  cover_image_url String?
+  slug            String?
+
+  // State
+  is_archived     Boolean   @default(false)
+  is_deleted      Boolean   @default(false)
+  archived_at     DateTime?
+  deleted_at      DateTime?
+
+  // Client-facing link expiry
+  link_expires_at DateTime?
+
+  // Tags
+  tags            String[]  @default([])
+
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  photographer    User      @relation(fields: [photographer_id], references: [id], onDelete: Cascade)
+  albums          Album[]
+  client_galleries ClientGallery[]
+  share_links     ShareLink[]
+
+  @@index([photographer_id])
+  @@index([photographer_id, is_archived, is_deleted])
+  @@map("projects")
+}
+
+// ============================================================
+// TABLE 7 — ALBUMS
+// Sub-folders inside a project.
+// ============================================================
+
+model Album {
+  id              String    @id @default(cuid())
+  project_id      String
+  photographer_id String
+  name            String
+  description     String?
+  cover_image_url String?
+  display_order   Int       @default(0)
+
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  project         Project   @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  media_files     MediaFile[]
+
+  @@index([project_id])
+  @@index([photographer_id])
+  @@map("albums")
+}
+
+// ============================================================
+// TABLE 8 — MEDIA FILES
+// All photos/videos. Original stored in R2. Only metadata in DB.
+// ============================================================
+
+model MediaFile {
+  id              String     @id @default(cuid())
+  album_id        String
+  photographer_id String
+
+  // File info
+  original_filename String
+  storage_key     String     @unique   // R2 object key for original
+  file_size       BigInt                // Bytes
+  mime_type       String
+  media_type      MediaType
+
+  // Dimensions (images)
+  width           Int?
+  height          Int?
+  duration_seconds Float?              // Videos
+
+  // Thumbnails (R2 keys)
+  thumb_small_key  String?
+  thumb_medium_key String?
+  thumb_large_key  String?
+  webp_key         String?
+  preview_key      String?             // Video preview frame
+
+  // Processing state
+  is_processed    Boolean    @default(false)
+  processing_error String?
+
+  // Metadata
+  tags            String[]   @default([])
+  exif_data       Json?                // EXIF extracted from image
+  is_deleted      Boolean    @default(false)
+  deleted_at      DateTime?
+
+  created_at      DateTime   @default(now())
+  updated_at      DateTime   @updatedAt
+
+  album           Album      @relation(fields: [album_id], references: [id], onDelete: Cascade)
+  selections      GallerySelection[]
+  upload_job      UploadJob?
+
+  @@index([album_id])
+  @@index([photographer_id])
+  @@index([media_type])
+  @@map("media_files")
+}
+
+// ============================================================
+// TABLE 9 — CLIENT GALLERIES
+// Secure tokenized gallery access. No login needed.
+// ============================================================
+
+model ClientGallery {
+  id              String    @id @default(cuid())
+  photographer_id String
+  project_id      String
+  token           String    @unique   // UUID token in share URL
+
+  // Client info (optional, no account)
+  client_name     String?
+  client_email    String?
+
+  // Gallery settings (per-gallery overrides)
+  max_selections  Int?                // NULL = use plan default
+  min_selections  Int?
+  allow_download  Boolean   @default(false)
+  show_watermark  Boolean   @default(true)
+  allow_comments  Boolean   @default(false)
+
+  // State
+  is_active       Boolean   @default(true)
+  is_submitted    Boolean   @default(false)
+  submitted_at    DateTime?
+  expires_at      DateTime?
+
+  // Analytics
+  view_count      Int       @default(0)
+  last_viewed_at  DateTime?
+
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  photographer    User      @relation(fields: [photographer_id], references: [id], onDelete: Cascade)
+  project         Project   @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  selections      GallerySelection[]
+  zip_jobs        ZipJob[]
+
+  @@index([photographer_id])
+  @@index([project_id])
+  @@map("client_galleries")
+}
+
+// ============================================================
+// TABLE 10 — GALLERY SELECTIONS
+// Per-file selection state saved by the client.
+// ============================================================
+
+model GallerySelection {
+  id              String         @id @default(cuid())
+  gallery_id      String
+  media_file_id   String
+  state           SelectionState @default(SELECTED)
+  comment         String?        // Optional note from client
+
+  created_at      DateTime       @default(now())
+  updated_at      DateTime       @updatedAt
+
+  gallery         ClientGallery  @relation(fields: [gallery_id], references: [id], onDelete: Cascade)
+  media_file      MediaFile      @relation(fields: [media_file_id], references: [id], onDelete: Cascade)
+
+  @@unique([gallery_id, media_file_id])   // One state per file per gallery
+  @@index([gallery_id])
+  @@map("gallery_selections")
+}
+
+// ============================================================
+// TABLE 11 — SHARE LINKS
+// Photographer-generated links for project/gallery sharing.
+// ============================================================
+
+model ShareLink {
+  id              String        @id @default(cuid())
+  photographer_id String
+  project_id      String
+  token           String        @unique
+
+  link_type       ShareLinkType @default(PUBLIC)
+  password_hash   String?       // Bcrypt hash, for PASSWORD_PROTECTED links
+
+  // Restrictions
+  is_downloadable Boolean       @default(false)
+  show_watermark  Boolean       @default(true)
+  expires_at      DateTime?
+  max_views       Int?          // NULL = unlimited
+  view_count      Int           @default(0)
+  allowed_emails  String[]      @default([])    // Email whitelist (optional)
+
+  is_active       Boolean       @default(true)
+  revoked_at      DateTime?
+
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  photographer    User          @relation(fields: [photographer_id], references: [id], onDelete: Cascade)
+  project         Project       @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([photographer_id])
+  @@index([project_id])
+  @@map("share_links")
+}
+
+// ============================================================
+// TABLE 12 — PAYMENTS
+// Every payment event from Stripe or Razorpay.
+// ============================================================
+
+model Payment {
+  id                String          @id @default(cuid())
+  user_id           String
+  plan_id           String?
+
+  provider          PaymentProvider
+  status            PaymentStatus
+
+  // Gateway refs
+  provider_payment_id   String?     @unique  // Stripe PaymentIntent ID / Razorpay order_id
+  provider_invoice_id   String?
+
+  // Amounts (in smallest unit)
+  amount            Int             // paise or cents
+  currency          String          @default("INR")
+  tax_amount        Int             @default(0)
+  discount_amount   Int             @default(0)
+
+  // Refund
+  is_refunded       Boolean         @default(false)
+  refund_amount     Int?
+  refunded_at       DateTime?
+  refund_reason     String?
+
+  // Metadata
+  failure_reason    String?
+  metadata          Json?
+
+  created_at        DateTime        @default(now())
+  updated_at        DateTime        @updatedAt
+
+  user              User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  invoice           Invoice?
+
+  @@index([user_id])
+  @@index([provider_payment_id])
+  @@map("payments")
+}
+
+// ============================================================
+// TABLE 13 — INVOICES
+// Tax invoices generated per payment.
+// ============================================================
+
+model Invoice {
+  id              String    @id @default(cuid())
+  user_id         String
+  payment_id      String    @unique
+
+  invoice_number  String    @unique     // INV-2024-0001
+  pdf_key         String?               // R2 key to PDF
+  amount          Int
+  tax_amount      Int       @default(0)
+  currency        String    @default("INR")
+
+  // Billing address snapshot
+  billing_name    String?
+  billing_email   String?
+  billing_address Json?
+  gst_number      String?
+
+  issued_at       DateTime  @default(now())
+  due_at          DateTime?
+
+  user            User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  payment         Payment   @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("invoices")
+}
+
+// ============================================================
+// TABLE 14 — NOTIFICATIONS
+// In-app notification feed per user.
+// ============================================================
+
+model Notification {
+  id          String           @id @default(cuid())
+  user_id     String
+  type        NotificationType
+  title       String
+  body        String
+  action_url  String?          // Deep link
+  is_read     Boolean          @default(false)
+  read_at     DateTime?
+  metadata    Json?
+
+  created_at  DateTime         @default(now())
+
+  user        User             @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, is_read])
+  @@map("notifications")
+}
+
+// ============================================================
+// TABLE 15 — INTEGRATION CONFIGS
+// AES-256 encrypted secrets. Only admin can manage.
+// Only ONE active config per provider+environment combo.
+// ============================================================
+
+model IntegrationConfig {
+  id              String              @id @default(cuid())
+  provider        IntegrationProvider
+  environment     String              @default("production")  // production | sandbox
+
+  // Keys stored AES-256 encrypted
+  public_key_enc  String?             // Encrypted public key / key ID
+  secret_key_enc  String?             // Encrypted secret key
+  extra_config_enc String?            // Encrypted JSON for extra fields (e.g. bucket name)
+
+  is_active       Boolean             @default(true)
+  last_tested_at  DateTime?
+  test_passed     Boolean?
+
+  rotated_at      DateTime?
+  rotated_by      String?             // Admin user ID
+
+  created_at      DateTime            @default(now())
+  updated_at      DateTime            @updatedAt
+
+  @@unique([provider, environment])
+  @@map("integration_configs")
+}
+
+// ============================================================
+// TABLE 16 — AUDIT LOGS
+// Immutable log of every sensitive user/admin action.
+// ============================================================
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  user_id     String?
+  action      AuditAction
+  resource    String?     // e.g. "project:abc123"
+  ip_address  String?
+  user_agent  String?
+  metadata    Json?       // Any extra context
+  created_at  DateTime    @default(now())
+
+  user        User?       @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([action])
+  @@index([created_at])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// TABLE 17 — ZIP JOBS
+// Async ZIP generation for selection downloads.
+// ============================================================
+
+model ZipJob {
+  id              String     @id @default(cuid())
+  user_id         String?    // NULL = client-initiated
+  gallery_id      String
+  bullmq_job_id   String?
+
+  status          JobStatus  @default(PENDING)
+
+  // What to zip
+  media_file_ids  String[]   // IDs of files to include
+  selection_state SelectionState? // Filter by state, NULL = all selected
+
+  // Output
+  zip_storage_key String?    // R2 key once generated
+  zip_size        BigInt?    // Bytes
+  download_url    String?    // Signed URL (temporary)
+  download_expires_at DateTime?
+
+  // Progress
+  progress_percent Int       @default(0)
+  error_message   String?
+  retry_count     Int        @default(0)
+
+  started_at      DateTime?
+  completed_at    DateTime?
+  created_at      DateTime   @default(now())
+  updated_at      DateTime   @updatedAt
+
+  gallery         ClientGallery @relation(fields: [gallery_id], references: [id], onDelete: Cascade)
+  user            User?         @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@index([gallery_id])
+  @@index([status])
+  @@map("zip_jobs")
+}
+
+// ============================================================
+// TABLE 18 — UPLOAD JOBS
+// Track multipart/resumable uploads per file.
+// ============================================================
+
+model UploadJob {
+  id              String     @id @default(cuid())
+  user_id         String
+  media_file_id   String?    @unique  // Set once MediaFile created
+
+  // R2 multipart upload
+  upload_id       String?             // R2 multipart upload ID
+  storage_key     String              // Target R2 key
+
+  // File info
+  filename        String
+  file_size       BigInt
+  mime_type       String
+  total_parts     Int?
+
+  status          JobStatus  @default(PENDING)
+  uploaded_parts  Json?      // Array of { partNumber, etag }
+  progress_bytes  BigInt     @default(0)
+
+  error_message   String?
+  retry_count     Int        @default(0)
+
+  expires_at      DateTime?  // Incomplete uploads cleaned up after this
+  completed_at    DateTime?
+  created_at      DateTime   @default(now())
+  updated_at      DateTime   @updatedAt
+
+  user            User       @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  media_file      MediaFile? @relation(fields: [media_file_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([status])
+  @@map("upload_jobs")
+}
